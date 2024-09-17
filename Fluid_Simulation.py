@@ -1,13 +1,16 @@
 
+from ast import List
 import taichi as ti
+
 ti.init(arch=ti.vulkan)
 
-# Ò»°ãÎïÀí³£Êı¶¨Òå
+# ä¸€èˆ¬ç‰©ç†å¸¸æ•°å®šä¹‰
 pi = 3.14159265
-k = 500
-gravity = ti.Vector([0, -9.8, 0])
+K = 500     # çŠ¶æ€æ–¹ç¨‹çš„å¸¸æ•°k
+viscosity = 1e-6    # ç²˜æ€§ç³»æ•°
+gravity = ti.Vector([0,0,-9.8])
 
-# Á£×ÓÎïÀíÁ¿¶¨Òå
+# ç²’å­ç‰©ç†é‡å®šä¹‰
 mass = 1e-6
 n = 100
 quad_size = 1.0 / n
@@ -17,41 +20,55 @@ substeps = int(1 / 60 // dt)
 
 x = ti.Vector.field(3,dtype=float,shape=(n,n,n))
 v = ti.Vector.field(3,dtype=float,shape=(n,n,n))
+density = ti.field(dtype=float,shape=(n,n,n))
+pressure = ti.field(dtype=float,shape=(n,n,n))
+F = ti.Vector.field(3,dtype=float,shape=(n,n,n))
+Neighbor_List = []
 
-# ¹şÏ£±í¶¨Òå
+
+# å“ˆå¸Œè¡¨å®šä¹‰
 Hashing_List = [None] * n**3
 Compact_Hashing_List = set()
 
-# ºËº¯Êı
-def kernel_fun(q):
+# æ ¸å‡½æ•°
+def kernel_fun(q) -> ti.f32:
     if q>=0 and q<1:
-        return (2/3 - q*q + 0.5 * q*q*q)*3/2/pi
+        return (2/3 - q*q + 0.5 * q*q*q)* 3/2/pi * 1/(quad_size**3)
     elif q>=1 and q<2:
-        return ((2-q)**3/6)*3/2/pi
+        return ((2-q)**3/6) * 3/2/pi * 1/(quad_size**3)
     elif q>=2:
         return 0
     
-@ti.kernel
-def Vector_Distance(v1: ti.template(), v2: ti.template()):
+def grad_kernel_fun(vi: ti.template(), vj: ti.template()) -> ti.Vector:
+    q = Vector_Distance(vi,vj) / quad_size
+    if q>=0 and q<1:
+        return (-2*q + 3/2*q**2) * 3/2/pi/quad_size**5 / q * (vj - vi)
+    elif q>=1 and q<2:
+        return (-(2-q)**2/2) * 3/2/pi/quad_size**5 / q * (vj - vi)
+    elif q>=2:
+        return ti.Vector([0,0,0])
+    
+def Vector_Distance(v1: ti.template(), v2: ti.template()) -> ti.f32:
     diff = v1 - v2
     return diff.norm()
     
-# Ê¹ÓÃÁËZ-OrderÔ­ÀíµÄ¹şÏ£·½·¨½øĞĞË÷ÒıÅÅĞò
+# ä½¿ç”¨äº†Z-OrderåŸç†çš„å“ˆå¸Œæ–¹æ³•è¿›è¡Œç´¢å¼•æ’åº
 @ti.kernel
 def particle_Zindex_Sort():
     Hashing_List.clear
     Compact_Hashing_List.clear
-    d = quad_size/n**3 # ³ß¶ÈËõ·Å±ÈÀı
+    d = quad_size/n**3 # å°ºåº¦ç¼©æ”¾æ¯”ä¾‹
     for i,j,k in x:
         r = x[i,j,k]
-        # ÓÉ¹«Ê½¼ÆËãZÇúÏßÔ­ÀíµÄ¹şÏ£Öµ
+        # ç”±å…¬å¼è®¡ç®—Zæ›²çº¿åŸç†çš„å“ˆå¸Œå€¼
         Z_curve_index = (  (r[0]/d    * n**2  ) * 73856093 
                          ^ (r[1]/d    * n     ) * 19349663 
                          ^ (r[2]/d            ) * 83492791) % n**3
-        Hashing_List[Z_curve_index].append([i,j,k])
+        index = ti.Vector([i,j,k])
+        Hashing_List[Z_curve_index].append(index)
         Compact_Hashing_List.add(Z_curve_index)
         
-# ³õÊ¼»¯Á£×ÓÎ»ÖÃºÍËÙ¶È
+# åˆå§‹åŒ–ç²’å­ä½ç½®å’Œé€Ÿåº¦
 @ti.kernel
 def init_particle():
     for i,j,k in x:
@@ -64,48 +81,69 @@ def init_particle():
         
 init_particle()
 
-# ÁÚÓòÁ£×ÓËÑË÷
+# é‚»åŸŸç²’å­æœç´¢
 @ti.kernel
 def Neighbor_Search(target_index:ti.template()):
-    Neighbor_List = []
+    Neighbor_List.clear
     Z_curve_index = Hashing_List.index([target_index]) 
-    # ÁÚÓòÉè¶¨Îª¡À1ÄÚµÄ¹şÏ£Ïä
+    # é‚»åŸŸè®¾å®šä¸ºÂ±1å†…çš„å“ˆå¸Œç®±
     Neighbor_Hashing_List = Hashing_List[Z_curve_index] + Hashing_List[Z_curve_index-1] + Hashing_List[Z_curve_index+1]
     for j in Neighbor_Hashing_List:
-        # 2±¶quad_size ÎªºËº¯ÊıÓĞĞ§¾àÀë
+        # 2å€quad_size ä¸ºæ ¸å‡½æ•°æœ‰æ•ˆè·ç¦»
         distance = Vector_Distance(target_index,j)
         if  distance <= 2 * quad_size and distance > 0:
+            i0 = target_index[0]
+            j0 = target_index[1]
+            k0 = target_index[2]
             Neighbor_List.append(j)
-            
-    return Neighbor_List
 
 
-# Ê¹ÓÃµÄËã·¨ÊÇ×î»ù´¡µÄÀûÓÃ×´Ì¬·½³ÌµÄSPH·½·¨
+
+# ä½¿ç”¨çš„ç®—æ³•æ˜¯æœ€åŸºç¡€çš„åˆ©ç”¨çŠ¶æ€æ–¹ç¨‹çš„SPHæ–¹æ³•
 @ti.kernel
-def substep():
+def GetDensityAndPressure():
     for i,j,k in x:
-        Neighbor_List = Neighbor_Search(x[i,j,k])
-        # ÓÉ²åÖµ¹«Ê½¼ÆËãÃÜ¶È
+        # ç”±æ’å€¼å…¬å¼è®¡ç®—å¯†åº¦
         i_density = 0
+        Neighbor_Search(ti.Vector([i,j,k]))
         for neibor in Neighbor_List:
             q = Vector_Distance(x[i,j,k],neibor) / quad_size
-            i_density += mass * kernel_fun(q) 
+            i_density += mass * kernel_fun(q) # ç”±æ’å€¼å…¬å¼æ±‚å’Œè®¡ç®—å¯†åº¦
+            
+        density[i,j,k] = i_density
+        pressure[i,j,k] = K * ((i_density/density0)**7 - 1)  # é€šè¿‡å¯†åº¦ç”±çŠ¶æ€æ–¹ç¨‹è®¡ç®—å‹å¼º
         
-        i_pressure = k * ((i_density/density0)**7 - 1)  # Í¨¹ıÃÜ¶ÈÓÉ×´Ì¬·½³Ì¼ÆËãÑ¹Ç¿
+@ti.kernel
+def GetForce():
+    for i,j,k in x:
+        i_grad_pressure = 0
+        i_laplace_v = 0
+        Neighbor_Search(ti.Vector([i,j,k])) # åœ¨æ­¤æ­¥éª¤ä¸­éœ€è¦é‡æ–°è¿›è¡Œé‚»åŸŸæœç´¢ï¼Œä¸å¤ªåˆç†ï¼Œè¿˜éœ€è¦è¿›ä¸€æ­¥æ”¹è¿›
+        for neibor in Neighbor_List[i,j,k]:
+            i1 = neibor[0]
+            j1 = neibor[1]
+            k1 = neibor[2]
+            i_grad_pressure += ti.Vector((pressure[i,j,k]/(density[i,j,k]**2) 
+                                          + pressure[i1,j1,k1]/(density[i1,j1,k1]**2)) 
+                                         * grad_kernel_fun(x[i,j,k],x[i1,j1,k1]))   # ç”±æ’å€¼å…¬å¼æ±‚å’Œè®¡ç®—å‹å¼ºåœºçš„æ¢¯åº¦
+            xij = ti.Vector(x[i,j,k]-x[i1,j1,k1])
+            # ç”±æ’å€¼å…¬å¼æ±‚å’Œè®¡ç®—é€Ÿåº¦åœºåœ¨æ‹‰æ™®æ‹‰æ–¯ç®—ç¬¦ä½œç”¨åçš„å€¼
+            i_laplace_v += (v[i,j,k].norm() - v[i1,j1,k1].norm) / density[i1,j1,k1] * xij.dot(grad_kernel_fun(x[i,j,k],x[i1,j1,k1])) / (xij.norm **2 + 0.01 * quad_size**2)
+            
+        # è¡¥è¶³æ±‚å’Œæ—¶çœç•¥çš„å€ç‡
+        i_grad_pressure *= density[i,j,k] * mass
+        i_laplace_v *= 2*mass
         
-
+        # ç”±æµä½“åŠ›å­¦å…¬å¼è®¡ç®—ç²’å­å—åŠ›
+        F_pressure_i = -mass / density[i,j,k] * i_grad_pressure
+        F_viscosity_i = mass * viscosity * i_laplace_v
+        F[i,j,k] = F_pressure_i + F_viscosity_i + mass * gravity
         
-
-        
-        
-    
-    
-    
-
-
-    
-
-
+@ti.kernel
+def Substep():
+    for i,j,k in x:
+        v[i,j,k] = v[i,j,k] + dt * F[i,j,k] / mass
+        x[i,j,k] = x[i,j,k] + dt * v[i,j,k]
 
 
 print(kernel_fun(1))
