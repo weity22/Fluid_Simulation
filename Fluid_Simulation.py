@@ -1,8 +1,8 @@
 
-from ast import List
+from ast import List, Return
 import taichi as ti
 
-ti.init(arch=ti.vulkan)
+ti.init(arch=ti.cpu)
 
 # 一般物理常数定义
 pi = 3.14159265
@@ -23,12 +23,25 @@ v = ti.Vector.field(3,dtype=float,shape=(n,n,n))
 density = ti.field(dtype=float,shape=(n,n,n))
 pressure = ti.field(dtype=float,shape=(n,n,n))
 F = ti.Vector.field(3,dtype=float,shape=(n,n,n))
-Neighbor_List = []
+Neighbor_List = ti.Vector.field(3,dtype=ti.i32, shape=100)
+Neighbor_Count = ti.field(dtype=ti.i32,shape=1)
 
 
 # 哈希表定义
-Hashing_List = [None] * n**3
-Compact_Hashing_List = set()
+Hashing_List = ti.Vector.field(3,dtype=ti.i32, shape=(n**3, 100))
+Z_index_List = ti.field(dtype=ti.i32,shape=(n,n,n))
+buckets = ti.field(dtype=ti.i32, shape=n**3)  # 用于存储每个桶当前的元素数量
+
+@ti.func
+def Append_To_HashingList(bucket_index, item):
+    # 获取当前桶的元素数量
+    current_size = buckets[bucket_index]
+    # 将新元素添加到当前桶
+    Hashing_List[bucket_index, current_size] = item
+    # 更新桶的元素数量
+    buckets[bucket_index] += 1
+
+#Compact_Hashing_List = set()
 
 # 核函数
 def kernel_fun(q) -> ti.f32:
@@ -48,26 +61,11 @@ def grad_kernel_fun(vi: ti.template(), vj: ti.template()) -> ti.Vector:
     elif q>=2:
         return ti.Vector([0,0,0])
     
+@ti.func
 def Vector_Distance(v1: ti.template(), v2: ti.template()) -> ti.f32:
     diff = v1 - v2
     return diff.norm()
     
-# 使用了Z-Order原理的哈希方法进行索引排序
-@ti.kernel
-def particle_Zindex_Sort():
-    Hashing_List.clear
-    Compact_Hashing_List.clear
-    d = quad_size/n**3 # 尺度缩放比例
-    for i,j,k in x:
-        r = x[i,j,k]
-        # 由公式计算Z曲线原理的哈希值
-        Z_curve_index = (  (r[0]/d    * n**2  ) * 73856093 
-                         ^ (r[1]/d    * n     ) * 19349663 
-                         ^ (r[2]/d            ) * 83492791) % n**3
-        index = ti.Vector([i,j,k])
-        Hashing_List[Z_curve_index].append(index)
-        Compact_Hashing_List.add(Z_curve_index)
-        
 # 初始化粒子位置和速度
 @ti.kernel
 def init_particle():
@@ -78,26 +76,76 @@ def init_particle():
             k * quad_size
          ]
         v[i,j,k]=[0,0,0]
+
+# 使用了Z-Order原理的哈希方法进行索引排序
+@ti.func
+def HashingList_clear():
+    for i,j in Hashing_List:
+        Hashing_List[i,j] = ti.Vector([0,0,0])
         
-init_particle()
+@ti.func
+def buckets_clear():
+    for i in buckets:
+        buckets[i] = 0;
+
+@ti.kernel
+def particle_Zindex_Sort():
+    HashingList_clear()
+    buckets_clear()
+    # List_clear(Compact_Hashing_List)
+    d = quad_size/n**3 # 尺度缩放比例
+    for i,j,k in x:
+        r = x[i,j,k]
+        # 由公式计算Z曲线原理的哈希值
+        Z_curve_index = (  ((int(r[0]/d)    * n**2  ) * 73856093) 
+                         ^ ((int(r[1]/d)    * n     ) * 19349663) 
+                         ^ ((int(r[2]/d)            ) * 83492791)   ) % n**3
+        #print('Zindex:',Z_curve_index)
+        Append_To_HashingList(Z_curve_index,[i,j,k])
+        Z_index_List[i,j,k] = Z_curve_index
+        # Compact_Hashing_List.add(Z_curve_index)
+
+@ti.kernel
+def print_HashingList():
+    for i in range(n**3):
+        if buckets[i]!=0:
+            for j in range(buckets[i]):
+                print('Z_index:',i,' conver ',Hashing_List[i,j])
+            
 
 # 邻域粒子搜索
+@ti.func
+def NeighborList_clear():
+    for i in Neighbor_List:
+        Neighbor_List[i] = ti.Vector([0,0,0])
+        
+    Neighbor_Count[0] = 0
+
+@ti.func
+def Append_To_NeighborList(i1,j1,k1):
+    Neighbor_List[Neighbor_Count[0]] = ti.Vector([i1,j1,k1])
+    Neighbor_Count[0] += 1
+
 @ti.kernel
-def Neighbor_Search(target_index:ti.template()):
-    Neighbor_List.clear
-    Z_curve_index = Hashing_List.index([target_index]) 
+def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
+    NeighborList_clear()
+    Z_curve_index = Z_index_List[i0,j0,k0]
+    print('Z_index = ', Z_curve_index)
     # 邻域设定为±1内的哈希箱
-    Neighbor_Hashing_List = Hashing_List[Z_curve_index] + Hashing_List[Z_curve_index-1] + Hashing_List[Z_curve_index+1]
-    for j in Neighbor_Hashing_List:
-        # 2倍quad_size 为核函数有效距离
-        distance = Vector_Distance(target_index,j)
-        if  distance <= 2 * quad_size and distance > 0:
-            i0 = target_index[0]
-            j0 = target_index[1]
-            k0 = target_index[2]
-            Neighbor_List.append(j)
-
-
+    for i in range(Z_curve_index - 100, Z_curve_index + 100):
+        for j in range(buckets[i]):
+            # 2倍quad_size 为核函数有效距离   
+            print('buckets:',buckets[i]) 
+            i1 = Hashing_List[i,j][0]
+            j1 = Hashing_List[i,j][1]
+            k1 = Hashing_List[i,j][2]
+            print('PossibleNeighbor:',ti.Vector([i1,j1,k1]))
+            distance = Vector_Distance(x[i0,j0,k0],x[i1,j1,k1])
+            print('quad_size_distance:',distance/quad_size)
+            if  distance <= 2 * quad_size and distance > 0:
+                print('Neighbor:',ti.Vector([i1,j1,k1]))
+                Append_To_NeighborList(i1,j1,k1)
+            print('\n')
 
 # 使用的算法是最基础的利用状态方程的SPH方法
 @ti.kernel
@@ -145,5 +193,15 @@ def Substep():
         v[i,j,k] = v[i,j,k] + dt * F[i,j,k] / mass
         x[i,j,k] = x[i,j,k] + dt * v[i,j,k]
 
-
-print(kernel_fun(1))
+@ti.kernel
+def print_NeighborList():
+    for i in range(Neighbor_Count[0]):
+        print('Neighbor:',Neighbor_List[i])
+        
+if __name__ == "__main__":
+    init_particle()
+    test1 = ti.Vector([20,20,20])
+    particle_Zindex_Sort()
+    #print_HashingList()
+    Neighbor_Search(55,10,10)
+    print_NeighborList()
