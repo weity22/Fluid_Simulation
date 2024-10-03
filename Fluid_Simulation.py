@@ -23,6 +23,7 @@ v = ti.Vector.field(3,dtype=float,shape=(n,n,n))
 density = ti.field(dtype=float,shape=(n,n,n))
 pressure = ti.field(dtype=float,shape=(n,n,n))
 F = ti.Vector.field(3,dtype=float,shape=(n,n,n))
+Neighbor_Grid_Hashing_List = ti.field(dtype=ti.i32,shape=27)
 Neighbor_List = ti.Vector.field(3,dtype=ti.i32, shape=100)
 Neighbor_Count = ti.field(dtype=ti.i32,shape=1)
 
@@ -88,18 +89,24 @@ def buckets_clear():
     for i in buckets:
         buckets[i] = 0;
 
+@ti.func
+def GetNeighborGrid(i0:ti.i32,j0:ti.i32,k0:ti.i32):
+    r = x[i0,j0,k0]
+    
+    
+
 @ti.kernel
 def particle_Zindex_Sort():
     HashingList_clear()
     buckets_clear()
     # List_clear(Compact_Hashing_List)
-    d = quad_size/n**3 # 尺度缩放比例
+    d = quad_size # 尺度缩放比例
     for i,j,k in x:
         r = x[i,j,k]
         # 由公式计算Z曲线原理的哈希值
-        Z_curve_index = (  ((int(r[0]/d)    * n**2  ) * 73856093) 
-                         ^ ((int(r[1]/d)    * n     ) * 19349663) 
-                         ^ ((int(r[2]/d)            ) * 83492791)   ) % n**3
+        Z_curve_index = (  (int((r[0]/d)        ) * 73856093) 
+                         ^ (int((r[1]/d)        ) * 19349663) 
+                         ^ (int((r[2]/d)        ) * 83492791)   ) % n**3
         #print('Zindex:',Z_curve_index)
         Append_To_HashingList(Z_curve_index,[i,j,k])
         Z_index_List[i,j,k] = Z_curve_index
@@ -118,7 +125,8 @@ def print_HashingList():
 def NeighborList_clear():
     for i in Neighbor_List:
         Neighbor_List[i] = ti.Vector([0,0,0])
-        
+    for j in range(27):
+        Neighbor_Grid_Hashing_List[j] = 0
     Neighbor_Count[0] = 0
 
 @ti.func
@@ -130,16 +138,29 @@ def Append_To_NeighborList(i1,j1,k1):
 def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
     NeighborList_clear()
     Z_curve_index = Z_index_List[i0,j0,k0]
+    d = quad_size # 尺度缩放比例
+    for i in range(-1,2):
+        for j in range(-1,2):
+            for k in range(-1,2):
+                r = x[i0,j0,k0]
+                Neighbor_Z_curve_index = (   (int((r[0]/d + i)      ) * 73856093) 
+                                     ^       (int((r[1]/d + j)      ) * 19349663) 
+                                     ^       (int((r[2]/d + k)      ) * 83492791)   ) % n**3
+                print('Neighbor_Z_index = ', Neighbor_Z_curve_index)
+                Neighbor_Grid_Hashing_List[(i+1)+(j+1)*3+(k+1)*9] = Neighbor_Z_curve_index
+                
     print('Z_index = ', Z_curve_index)
-    # 邻域设定为±1内的哈希箱
-    for i in range(Z_curve_index - 100, Z_curve_index + 100):
-        for j in range(buckets[i]):
+    for i in range(27):
+        print(Neighbor_Grid_Hashing_List[i])
+    for i in range(27):
+        for j in range(buckets[Neighbor_Grid_Hashing_List[i]]):
             # 2倍quad_size 为核函数有效距离   
-            print('buckets:',buckets[i]) 
-            i1 = Hashing_List[i,j][0]
-            j1 = Hashing_List[i,j][1]
-            k1 = Hashing_List[i,j][2]
-            print('PossibleNeighbor:',ti.Vector([i1,j1,k1]))
+            print('Neighbor_Z_index = ',Neighbor_Grid_Hashing_List[i])
+            print('buckets:',buckets[Neighbor_Grid_Hashing_List[i]]) 
+            i1 = Hashing_List[Neighbor_Grid_Hashing_List[i],j][0]
+            j1 = Hashing_List[Neighbor_Grid_Hashing_List[i],j][1]
+            k1 = Hashing_List[Neighbor_Grid_Hashing_List[i],j][2]
+            print('PossibleNeighbor:',Hashing_List[Neighbor_Grid_Hashing_List[i],j])
             distance = Vector_Distance(x[i0,j0,k0],x[i1,j1,k1])
             print('quad_size_distance:',distance/quad_size)
             if  distance <= 2 * quad_size and distance > 0:
@@ -200,7 +221,6 @@ def print_NeighborList():
         
 if __name__ == "__main__":
     init_particle()
-    test1 = ti.Vector([20,20,20])
     particle_Zindex_Sort()
     #print_HashingList()
     Neighbor_Search(55,10,10)
