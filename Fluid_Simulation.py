@@ -1,5 +1,4 @@
 
-from ast import List, Return
 import taichi as ti
 
 ti.init(arch=ti.cpu)
@@ -10,7 +9,7 @@ K = 500     # 状态方程的常数k
 viscosity = 1e-6    # 粘性系数
 gravity = ti.Vector([0,0,-9.8])
 
-# 粒子物理量定义
+# 流体粒子物理量定义
 mass = 1e-6
 n = 100
 quad_size = 1.0 / n
@@ -23,10 +22,15 @@ v = ti.Vector.field(3,dtype=float,shape=(n,n,n))
 density = ti.field(dtype=float,shape=(n,n,n))
 pressure = ti.field(dtype=float,shape=(n,n,n))
 F = ti.Vector.field(3,dtype=float,shape=(n,n,n))
-Neighbor_Grid_Hashing_List = ti.field(dtype=ti.i32,shape=27)
+Neighbor_Grid_Hashing_List = ti.field(dtype=ti.i32,shape=125)
 Neighbor_List = ti.Vector.field(3,dtype=ti.i32, shape=100)
 Neighbor_Count = ti.field(dtype=ti.i32,shape=1)
 
+#边界粒子定义
+
+Boundary_x = ti.Vector.field(3,dtype=float,shape=(n,n,8))   # 边界容器尺寸为n*2n*n，拆分为8个n*n的表面（不封顶）
+Nei_boundary_List = ti.Vector.field(3,dtype=ti.i32, shape=20)   # 粒子的邻域边界粒子
+Nei_boundary_Count = ti.field(dtype=ti.i32,shape=1)
 
 # 哈希表定义
 Hashing_List = ti.Vector.field(3,dtype=ti.i32, shape=(n**3, 100))
@@ -72,11 +76,56 @@ def Vector_Distance(v1: ti.template(), v2: ti.template()) -> ti.f32:
 def init_particle():
     for i,j,k in x:
         x[i,j,k] = [
-            i * quad_size,
-            j * quad_size,
-            k * quad_size
-         ]
+            0.5 * quad_size + i * quad_size,
+            0.5 * quad_size + j * quad_size,
+            0.5 * quad_size + k * quad_size
+            ]
         v[i,j,k]=[0,0,0]
+
+@ti.kernel
+def init_boundary():
+    for i,j,k in Boundary_x:
+        if k == 0:
+            Boundary_x[i,j,k] = [
+                i * quad_size,
+                0,
+                j * quad_size
+                ]
+        
+        if k == 1 or k == 2:
+            Boundary_x[i,j,k] = [
+                1.0,
+                k-1 + i * quad_size,
+                j * quad_size
+                ]
+        
+        if k == 3:
+            Boundary_x[i,j,k] = [
+                i * quad_size,
+                2.0,
+                j * quad_size
+                ]
+            
+        if k == 4 or k == 5:
+            Boundary_x[i,j,k] = [
+                0,
+                5-k + i * quad_size,
+                j * quad_size
+                ]
+            
+        if k == 6 or k == 7:
+            Boundary_x[i,j,k] = [
+                i * quad_size,
+                k-6 + j * quad_size,
+                0
+                ]
+
+@ti.kernel
+def print_boundary():
+    for i,j,k in Boundary_x:
+        print('boundary:',ti.Vector([i,j,k]))
+        print('x:',Boundary_x[i,j,k])
+    
 
 # 使用了Z-Order原理的哈希方法进行索引排序
 @ti.func
@@ -88,12 +137,7 @@ def HashingList_clear():
 def buckets_clear():
     for i in buckets:
         buckets[i] = 0;
-
-@ti.func
-def GetNeighborGrid(i0:ti.i32,j0:ti.i32,k0:ti.i32):
-    r = x[i0,j0,k0]
-    
-    
+   
 
 @ti.kernel
 def particle_Zindex_Sort():
@@ -139,20 +183,20 @@ def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
     NeighborList_clear()
     Z_curve_index = Z_index_List[i0,j0,k0]
     d = quad_size # 尺度缩放比例
-    for i in range(-1,2):
-        for j in range(-1,2):
-            for k in range(-1,2):
+    for i in range(-2,3):
+        for j in range(-2,3):
+            for k in range(-2,3):
                 r = x[i0,j0,k0]
                 Neighbor_Z_curve_index = (   (int((r[0]/d + i)      ) * 73856093) 
                                      ^       (int((r[1]/d + j)      ) * 19349663) 
                                      ^       (int((r[2]/d + k)      ) * 83492791)   ) % n**3
                 print('Neighbor_Z_index = ', Neighbor_Z_curve_index)
-                Neighbor_Grid_Hashing_List[(i+1)+(j+1)*3+(k+1)*9] = Neighbor_Z_curve_index
+                Neighbor_Grid_Hashing_List[(i+2)+(j+2)*5+(k+2)*25] = Neighbor_Z_curve_index
                 
     print('Z_index = ', Z_curve_index)
-    for i in range(27):
+    for i in range(125):
         print(Neighbor_Grid_Hashing_List[i])
-    for i in range(27):
+    for i in range(125):
         for j in range(buckets[Neighbor_Grid_Hashing_List[i]]):
             # 2倍quad_size 为核函数有效距离   
             print('Neighbor_Z_index = ',Neighbor_Grid_Hashing_List[i])
@@ -167,6 +211,73 @@ def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
                 print('Neighbor:',ti.Vector([i1,j1,k1]))
                 Append_To_NeighborList(i1,j1,k1)
             print('\n')
+
+## 邻域的边界粒子搜索：
+
+@ti.func
+def Nei_boundary_List_clear():
+    for i in range(Nei_boundary_Count[0]):
+        Nei_boundary_List[i] = ti.Vector([0,0,0])
+    
+    Nei_boundary_Count[0] = 0
+
+@ti.kernel
+def Nei_boundary_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
+    Nei_boundary_List_clear()
+    r = x[i0,j0,k0]
+    
+    if r[0] <= 2 * quad_size:
+        for i in range(n):
+            for j in range(n):
+                if Vector_Distance(r,Boundary_x[i,j,4]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,4])
+                    Nei_boundary_Count[0] += 1
+                    
+                elif Vector_Distance(r,Boundary_x[i,j,5]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,5])
+                    Nei_boundary_Count[0] += 1
+                    
+    elif r[0] >= 1.0 - 2 * quad_size:
+        for i in range(n):
+            for j in range(n):
+                if Vector_Distance(r,Boundary_x[i,j,1]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,1])
+                    Nei_boundary_Count[0] += 1
+                    
+                elif Vector_Distance(r,Boundary_x[i,j,2]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,2])
+                    Nei_boundary_Count[0] += 1
+                    
+    if r[1] <= 2 * quad_size:
+        for i in range(n):
+            for j in range(n):
+                if Vector_Distance(r,Boundary_x[i,j,0]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,0])
+                    Nei_boundary_Count[0] += 1
+                    
+    elif r[1] >= 2.0 - 2 * quad_size:
+        for i in range(n):
+            for j in range(n):
+                if Vector_Distance(r,Boundary_x[i,j,3]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,3])
+                    Nei_boundary_Count[0] += 1
+                    
+    if r[2] <= 2 * quad_size:
+        for i in range(n):
+            for j in range(n):
+                if Vector_Distance(r,Boundary_x[i,j,6]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,6])
+                    Nei_boundary_Count[0] += 1
+                    
+                elif Vector_Distance(r,Boundary_x[i,j,7]) <= 2 * quad_size:
+                    Nei_boundary_List[Nei_boundary_Count[0]] = ti.Vector([i,j,7])
+                    Nei_boundary_Count[0] += 1
+                   
+@ti.kernel
+def print_Nei_boundary_List():
+    for i in range(Nei_boundary_Count[0]):
+        print('No.',i)
+        print('Nei_boundary:',Nei_boundary_List[i])
 
 # 使用的算法是最基础的利用状态方程的SPH方法
 @ti.kernel
@@ -221,7 +332,12 @@ def print_NeighborList():
         
 if __name__ == "__main__":
     init_particle()
-    particle_Zindex_Sort()
+    init_boundary()
+    #particle_Zindex_Sort()
     #print_HashingList()
-    Neighbor_Search(55,10,10)
-    print_NeighborList()
+    #Neighbor_Search(55,10,10)
+    #print_NeighborList()
+    
+    #print_boundary()
+    Nei_boundary_Search(0,99,50)
+    print_Nei_boundary_List()
