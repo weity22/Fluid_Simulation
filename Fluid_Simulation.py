@@ -206,7 +206,7 @@ def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
     d = quad_size # 尺度缩放比例
     
     r = x[i0,j0,k0]
-
+    # 计算周围125格内，每个格子对应的Z-index，以便后面邻域搜索
     for i in range(-2,3):
         if r[0]/d + i < 0 or r[0]/d + i > n-1:
             continue
@@ -224,12 +224,14 @@ def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
                 Neighbor_Grid_Hashing_List[i0,j0,k0,Neighbor_Grid_buckets[i0,j0,k0]] = Neighbor_Z_curve_index
                 Neighbor_Grid_buckets[i0,j0,k0] += 1
     
-
+    #用上面储存的Z-index查询邻居
     for i in range(Neighbor_Grid_buckets[i0,j0,k0]):
         for j in range(buckets[Neighbor_Grid_Hashing_List[i0,j0,k0,i]]):
             # 2倍quad_size 为核函数有效距离   
             #print('Neighbor_Z_index = ',Neighbor_Grid_Hashing_List[i0,j0,k0,i])
             #print('buckets:',buckets[Neighbor_Grid_Hashing_List[i0,j0,k0,i]]) 
+            
+            ###获取每一个哈希表上的粒子的index，它们都是可能的邻居，再判断是否为邻居
             i1 = Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j][0]
             j1 = Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j][1]
             k1 = Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j][2]
@@ -242,7 +244,8 @@ def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
             #print('\n')
                 
     #print_NeighborList()
-
+    #注释代码为调试用
+                
 @ti.func
 def print_NeighborList(i,j,k):
     for index in range(Neighbor_Count[i,j,k]):
@@ -319,28 +322,32 @@ def print_Nei_boundary_List():
 # 使用的算法是最基础的利用状态方程的SPH方法
 @ti.kernel
 def GetDensityAndPressure():
+    
+    '''换成下面这段循环可以换为串行
+    for l in range(1):
+        for i in range(n):
+            for j in range(n):
+                for k in range(n):
+    '''
     for i,j,k in x:
-        # 由插值公式计算密度
-        if i != 5 or j != 0 or k != 3:
-            continue
-        
+        # 由插值公式计算密度        
         i_density = 0.0
-        Neighbor_Search(i,j,k)
+        Neighbor_Search(i,j,k)      #感觉主要是这个函数里面出现了竞争
         print_NeighborList(i,j,k)
-        for index in range(Neighbor_Count[i,j,k]):
+        for index in range(Neighbor_Count[i,j,k]):  #每个粒子对应一个邻居表，这个函数返回[i,j,k]对应的粒子的邻居数量
             r = x[
-                Neighbor_List[i,j,k,index][0],
-                Neighbor_List[i,j,k,index][1],
-                Neighbor_List[i,j,k,index][2]
+            Neighbor_List[i,j,k,index][0],
+            Neighbor_List[i,j,k,index][1],
+            Neighbor_List[i,j,k,index][2]
                 ]
             q = Vector_Distance(x[i,j,k],r) / quad_size
-            kernel_fun(q,i,j,k)
-            if i == 5 and j == 0 and k == 3:
+            kernel_fun(q,i,j,k) #核函数，结果返回到W上
+            #if i == 5 and j == 0 and k == 3:
                 
-                print('r = ',r)
-                print('W = ',W[i,j,k])
+            #    print('r = ',r)
+            #    print('W = ',W[i,j,k])
 
-            i_density += mass * W[i,j,k]    # 由插值公式求和计算密度
+        i_density += mass * W[i,j,k]    # 由插值公式求和计算密度
             
         density[i,j,k] = i_density
         pressure[i,j,k] = K * ((i_density/density0)**7 - 1)     # 通过密度由状态方程计算压强
