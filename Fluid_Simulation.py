@@ -11,7 +11,7 @@ gravity = ti.Vector([0,0,-9.8])
 
 # 流体粒子物理量定义
 mass = 1e-6
-n = 100
+n = 10
 quad_size = 1.0 / n
 density0 = 1
 dt = 4e-2 / n
@@ -22,9 +22,13 @@ v = ti.Vector.field(3,dtype=float,shape=(n,n,n))
 density = ti.field(dtype=float,shape=(n,n,n))
 pressure = ti.field(dtype=float,shape=(n,n,n))
 F = ti.Vector.field(3,dtype=float,shape=(n,n,n))
-Neighbor_Grid_Hashing_List = ti.field(dtype=ti.i32,shape=125)
-Neighbor_List = ti.Vector.field(3,dtype=ti.i32, shape=100)
-Neighbor_Count = ti.field(dtype=ti.i32,shape=1)
+Neighbor_Grid_Hashing_List = ti.field(dtype=ti.i32,shape=(n,n,n,125))
+Neighbor_Grid_buckets = ti.field(dtype=ti.i32,shape=(n,n,n))
+Neighbor_List = ti.Vector.field(3,dtype=ti.i32, shape=(n,n,n,100))
+Neighbor_Count = ti.field(dtype=ti.i32,shape=(n,n,n))
+
+W = ti.field(dtype=float,shape=(n,n,n))
+delta_W = ti.Vector.field(3,dtype=float,shape=1)
 
 #边界粒子定义
 
@@ -46,17 +50,26 @@ def Append_To_HashingList(bucket_index, item):
     # 更新桶的元素数量
     buckets[bucket_index] += 1
 
-#Compact_Hashing_List = set()
+ti.func
+def Append_To_List(v,item,List,buckets):
+    i = v[0]
+    j = v[1]
+    k = v[2]
+    List[i,j,k,buckets[i,j,k]] = item
+    buckets[i,j,k] += 1
+
 
 # 核函数
-def kernel_fun(q) -> ti.f32:
+@ti.func    
+def kernel_fun(q,i,j,k):
     if q>=0 and q<1:
-        return (2/3 - q*q + 0.5 * q*q*q)* 3/2/pi * 1/(quad_size**3)
+        W[i,j,k] = (2/3 - q*q + 0.5 * q*q*q)* 3/2/pi * 1/(quad_size**3)
     elif q>=1 and q<2:
-        return ((2-q)**3/6) * 3/2/pi * 1/(quad_size**3)
+        W[i,j,k] = ((2-q)**3/6) * 3/2/pi * 1/(quad_size**3)
     elif q>=2:
-        return 0
+        W[i,j,k] = 0
     
+@ti.func
 def grad_kernel_fun(vi: ti.template(), vj: ti.template()) -> ti.Vector:
     q = Vector_Distance(vi,vj) / quad_size
     if q>=0 and q<1:
@@ -167,50 +180,74 @@ def print_HashingList():
 # 邻域粒子搜索
 @ti.func
 def NeighborList_clear():
-    for i in Neighbor_List:
-        Neighbor_List[i] = ti.Vector([0,0,0])
-    for j in range(27):
-        Neighbor_Grid_Hashing_List[j] = 0
-    Neighbor_Count[0] = 0
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                for index in range(Neighbor_Count[i,j,k]):
+                    Neighbor_List[i,j,k,index] = ti.Vector([0,0,0])
+                Neighbor_Count[i,j,k] = 0
+                
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                for index in range(Neighbor_Grid_buckets[i,j,k]):
+                    Neighbor_Grid_Hashing_List[i,j,k,index] = 0
+                Neighbor_Grid_buckets[i,j,k] = 0
+                
+@ti.func
+def Append_To_NeighborList(i,j,k,i1,j1,k1):
+    Neighbor_List[i,j,k,Neighbor_Count[i,j,k]] = ti.Vector([i1,j1,k1])
+    Neighbor_Count[i,j,k] += 1
 
 @ti.func
-def Append_To_NeighborList(i1,j1,k1):
-    Neighbor_List[Neighbor_Count[0]] = ti.Vector([i1,j1,k1])
-    Neighbor_Count[0] += 1
-
-@ti.kernel
 def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
     NeighborList_clear()
-    Z_curve_index = Z_index_List[i0,j0,k0]
+    #Z_curve_index = Z_index_List[i0,j0,k0]
     d = quad_size # 尺度缩放比例
+    
+    r = x[i0,j0,k0]
+
     for i in range(-2,3):
+        if r[0]/d + i < 0 or r[0]/d + i > n-1:
+            continue
         for j in range(-2,3):
+            if r[1]/d + j < 0 or r[1]/d + j > 2*(n-1):
+                continue
             for k in range(-2,3):
+                if r[2]/d + k < 0 or r[2]/d + k > n-1:
+                    continue
                 r = x[i0,j0,k0]
                 Neighbor_Z_curve_index = (   (int((r[0]/d + i)      ) * 73856093) 
                                      ^       (int((r[1]/d + j)      ) * 19349663) 
                                      ^       (int((r[2]/d + k)      ) * 83492791)   ) % n**3
-                print('Neighbor_Z_index = ', Neighbor_Z_curve_index)
-                Neighbor_Grid_Hashing_List[(i+2)+(j+2)*5+(k+2)*25] = Neighbor_Z_curve_index
-                
-    print('Z_index = ', Z_curve_index)
-    for i in range(125):
-        print(Neighbor_Grid_Hashing_List[i])
-    for i in range(125):
-        for j in range(buckets[Neighbor_Grid_Hashing_List[i]]):
+                #print('Neighbor_Z_index = ', Neighbor_Z_curve_index)
+                Neighbor_Grid_Hashing_List[i0,j0,k0,Neighbor_Grid_buckets[i0,j0,k0]] = Neighbor_Z_curve_index
+                Neighbor_Grid_buckets[i0,j0,k0] += 1
+    
+
+    for i in range(Neighbor_Grid_buckets[i0,j0,k0]):
+        for j in range(buckets[Neighbor_Grid_Hashing_List[i0,j0,k0,i]]):
             # 2倍quad_size 为核函数有效距离   
-            print('Neighbor_Z_index = ',Neighbor_Grid_Hashing_List[i])
-            print('buckets:',buckets[Neighbor_Grid_Hashing_List[i]]) 
-            i1 = Hashing_List[Neighbor_Grid_Hashing_List[i],j][0]
-            j1 = Hashing_List[Neighbor_Grid_Hashing_List[i],j][1]
-            k1 = Hashing_List[Neighbor_Grid_Hashing_List[i],j][2]
-            print('PossibleNeighbor:',Hashing_List[Neighbor_Grid_Hashing_List[i],j])
+            #print('Neighbor_Z_index = ',Neighbor_Grid_Hashing_List[i0,j0,k0,i])
+            #print('buckets:',buckets[Neighbor_Grid_Hashing_List[i0,j0,k0,i]]) 
+            i1 = Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j][0]
+            j1 = Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j][1]
+            k1 = Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j][2]
+            #print('PossibleNeighbor:',Hashing_List[Neighbor_Grid_Hashing_List[i0,j0,k0,i],j])
             distance = Vector_Distance(x[i0,j0,k0],x[i1,j1,k1])
-            print('quad_size_distance:',distance/quad_size)
+            #print('quad_size_distance:',distance/quad_size)
             if  distance <= 2 * quad_size and distance > 0:
-                print('Neighbor:',ti.Vector([i1,j1,k1]))
-                Append_To_NeighborList(i1,j1,k1)
-            print('\n')
+                #print('Neighbor:',ti.Vector([i1,j1,k1]))
+                Append_To_NeighborList(i0,j0,k0,i1,j1,k1)
+            #print('\n')
+                
+    #print_NeighborList()
+
+@ti.func
+def print_NeighborList(i,j,k):
+    for index in range(Neighbor_Count[i,j,k]):
+        print('For ',[i,j,k])
+        print('Neighbor:',Neighbor_List[i,j,k,index])
 
 ## 邻域的边界粒子搜索：
 
@@ -284,14 +321,29 @@ def print_Nei_boundary_List():
 def GetDensityAndPressure():
     for i,j,k in x:
         # 由插值公式计算密度
-        i_density = 0
-        Neighbor_Search(ti.Vector([i,j,k]))
-        for neibor in Neighbor_List:
-            q = Vector_Distance(x[i,j,k],neibor) / quad_size
-            i_density += mass * kernel_fun(q) # 由插值公式求和计算密度
+        if i != 5 or j != 0 or k != 3:
+            continue
+        
+        i_density = 0.0
+        Neighbor_Search(i,j,k)
+        print_NeighborList(i,j,k)
+        for index in range(Neighbor_Count[i,j,k]):
+            r = x[
+                Neighbor_List[i,j,k,index][0],
+                Neighbor_List[i,j,k,index][1],
+                Neighbor_List[i,j,k,index][2]
+                ]
+            q = Vector_Distance(x[i,j,k],r) / quad_size
+            kernel_fun(q,i,j,k)
+            if i == 5 and j == 0 and k == 3:
+                
+                print('r = ',r)
+                print('W = ',W[i,j,k])
+
+            i_density += mass * W[i,j,k]    # 由插值公式求和计算密度
             
         density[i,j,k] = i_density
-        pressure[i,j,k] = K * ((i_density/density0)**7 - 1)  # 通过密度由状态方程计算压强
+        pressure[i,j,k] = K * ((i_density/density0)**7 - 1)     # 通过密度由状态方程计算压强
         
 @ti.kernel
 def GetForce():
@@ -318,26 +370,29 @@ def GetForce():
         F_pressure_i = -mass / density[i,j,k] * i_grad_pressure
         F_viscosity_i = mass * viscosity * i_laplace_v
         F[i,j,k] = F_pressure_i + F_viscosity_i + mass * gravity
+
+@ti.kernel
+def print_density(i0:ti.i32,j0:ti.i32,k0:ti.i32):
+    print('density in:',[i0,j0,k0])
+    print('density = ',density[i0,j0,k0])
         
 @ti.kernel
 def Substep():
     for i,j,k in x:
         v[i,j,k] = v[i,j,k] + dt * F[i,j,k] / mass
         x[i,j,k] = x[i,j,k] + dt * v[i,j,k]
-
-@ti.kernel
-def print_NeighborList():
-    for i in range(Neighbor_Count[0]):
-        print('Neighbor:',Neighbor_List[i])
         
 if __name__ == "__main__":
     init_particle()
     init_boundary()
-    #particle_Zindex_Sort()
+    particle_Zindex_Sort()
     #print_HashingList()
     #Neighbor_Search(55,10,10)
     #print_NeighborList()
     
     #print_boundary()
-    Nei_boundary_Search(0,99,50)
-    print_Nei_boundary_List()
+    #Nei_boundary_Search(0,99,50)
+    #print_Nei_boundary_List()
+    GetDensityAndPressure()
+    print_density(5,0,3)
+    
