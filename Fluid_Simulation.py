@@ -243,13 +243,13 @@ def Neighbor_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
                 Append_To_NeighborList(i0,j0,k0,i1,j1,k1)
             #print('\n')
                 
-    #print_NeighborList()
+    print_NeighborList(i0,j0,k0)
     #注释代码为调试用
                 
 @ti.func
 def print_NeighborList(i,j,k):
+    print('For ',[i,j,k])
     for index in range(Neighbor_Count[i,j,k]):
-        print('For ',[i,j,k])
         print('Neighbor:',Neighbor_List[i,j,k,index])
 
 ## 邻域的边界粒子搜索：
@@ -388,18 +388,23 @@ def Substep():
     for i,j,k in x:
         v[i,j,k] = v[i,j,k] + dt * F[i,j,k] / mass
         x[i,j,k] = x[i,j,k] + dt * v[i,j,k]
+
+@ti.kernel
+def test():
+    for i,j,k in x:
+        Neighbor_Search(i,j,k)
         
 if __name__ == "__main__":
     init_particle()
     init_boundary()
     particle_Zindex_Sort()
     #print_HashingList()
-    #Neighbor_Search(55,10,10)
-    #print_NeighborList()
+    test()
+    
     
     #print_boundary()
     #Nei_boundary_Search(0,99,50)
     #print_Nei_boundary_List()
-    GetDensityAndPressure()
-    print_density(5,0,3)
+    #GetDensityAndPressure()
+    #print_density(5,0,3)
     
