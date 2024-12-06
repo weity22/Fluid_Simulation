@@ -34,10 +34,11 @@ Neighbor_Count = ti.field(dtype=ti.i32,shape=(n,n,n))
 W = ti.field(dtype=float,shape=(n,n,n))
 
 #边界粒子定义
-
+mass_boundary = 5*mass
 Boundary_x = ti.Vector.field(3,dtype=float,shape=(n+2,n+2,14))   # 边界容器尺寸为n*2n*n，拆分为8个n*n的表面（不封顶）
 Nei_boundary_List = ti.Vector.field(3,dtype=ti.i32, shape=(n,n,n,20))   # 粒子的邻域边界粒子
 Nei_boundary_Count = ti.field(dtype=ti.i32,shape=(n,n,n))
+Boundary_volume = ti.field(dtype=float,shape=(n+2,n+2,14))
 
 # 哈希表定义
 Hashing_List = ti.Vector.field(3,dtype=ti.i32, shape=(n**3, 100))
@@ -71,7 +72,20 @@ def kernel_fun(q,i,j,k):
         W[i,j,k] = ((2-q)**3/6) * 3/2/pi * 1/((quad_size/2.0)**3)
     elif q>=2:
         W[i,j,k] = 0.0
+
+@ti.func
+def kernel_func(q):
+    W = 0.0
+    if q>=0 and q<1:
+        W = (2/3 - q*q + 0.5 * q*q*q)* 3/2/pi * 1/((quad_size/2.0)**3)
+    elif q>=1 and q<2:
+        W = ((2-q)**3/6) * 3/2/pi * 1/((quad_size/2.0)**3)
+    elif q>=2:
+        W = 0.0
+        
+    return W
     
+
 @ti.func
 def grad_kernel_fun(vi: ti.template(), vj: ti.template())->ti.Vector:
     q = Vector_Distance(vi,vj) / (quad_size/2)
@@ -83,7 +97,22 @@ def grad_kernel_fun(vi: ti.template(), vj: ti.template())->ti.Vector:
         delta_W = ti.Vector([0,0,0])
         
     return delta_W
-    
+
+
+'''
+@ti.func
+def grad_kernel_fun(vi: ti.template(), vj: ti.template())->ti.Vector:
+    delta_W = ti.Vector([0.0,0.0,0.0])
+    delta_v = (vi-vj) / Vector_Distance(vi,vj)
+    q = Vector_Distance(vi,vj) / (quad_size/2)
+    _q = Vector_Distance(vi+delta_v,vj) / (quad_size/2)
+    if q>=0 and q<2:
+        delta_W = (kernel_func(_q) - kernel_func(q)) / (_q - q) * delta_v
+    else:
+        pass
+    return delta_W
+    '''
+
 @ti.func
 def Vector_Distance(v1: ti.template(), v2: ti.template()) -> ti.f32:
     diff = v1 - v2
@@ -96,7 +125,7 @@ def init_particle():
         x[i,j,k] = [
             (i+1) * s * quad_size,
             (j+1) * s * quad_size,
-            (k+1) * s * quad_size
+            k * s * quad_size
             ]
         v[i,j,k]=[0.0,0.0,0.0]
 
@@ -113,21 +142,21 @@ def init_boundary():
         if k == 1:
             Boundary_x[i,j,k] = [
                 (n+2) * s * quad_size,
-                (i+1) * s * quad_size,
-                (j+1) * s * quad_size
+                i * s * quad_size,
+                j * s * quad_size
                 ]
             
         if k == 2:
             Boundary_x[i,j,k] = [
                 (n+2) * s * quad_size,
-                (n+2 + i+1) * s * quad_size,
-                (j+1) * s * quad_size
+                (n+2 + i) * s * quad_size,
+                j * s * quad_size
                 ]
         
         if k == 3:
             Boundary_x[i,j,k] = [
-                i * s * quad_size,
-                2 * (n+2) * s * quad_size + 1 * s * quad_size,
+                (i+1) * s * quad_size,
+                2 * (n+2) * s * quad_size,
                 j * s * quad_size
                 ]
             
@@ -135,70 +164,70 @@ def init_boundary():
             Boundary_x[i,j,k] = [
                 0.0,
                 (n+2 + i+1) * s * quad_size,
-                (j+1) * s * quad_size
+                j * s * quad_size
                 ]
             
         if k == 5:
             Boundary_x[i,j,k] = [
                 0.0,
                 (i+1) * s * quad_size,
-                (j+1) * s * quad_size
+                j * s * quad_size
                 ]
             
         if k == 6:
             Boundary_x[i,j,k] = [
                 i * s * quad_size,
-                (j+1) * s * quad_size,
-                0.0
+                j * s * quad_size,
+                -s * quad_size
                 ]
             
         if k == 7:
             Boundary_x[i,j,k] = [
                 i * s * quad_size,
-                (n+2) * s * quad_size + (j+1) * s * quad_size,
-                0.0
+                (n+2 + j) * s * quad_size,
+                -s * quad_size
                 ]
             
         if k == 8:
             Boundary_x[i,j,k] = [
                 i * s * quad_size,
                 0.0,
-                (n+2) * s * quad_size + j * s * quad_size
+                (n+2 + j) * s * quad_size
                 ]
-            
+        
         if k == 9:
             Boundary_x[i,j,k] = [
                 (n+2) * s * quad_size,
-                (i+1) * s * quad_size,
-                (n+2) * s * quad_size + (j+1) * s * quad_size
+                i * s * quad_size,
+                (n+2 + j) * s * quad_size
                 ]
             
         if k == 10:
             Boundary_x[i,j,k] = [
                 (n+2) * s * quad_size,
-                (n+2 + i+1) * s * quad_size,
-                (n+2) * s * quad_size + (j+1) * s * quad_size
+                (n+2 + i) * s * quad_size,
+                (n+2 + j) * s * quad_size
                 ]
-         
+        
         if k == 11:
             Boundary_x[i,j,k] = [
-                i * s * quad_size,
-                2 * (n+2) * s * quad_size + 1 * s * quad_size,
-                (n+2) * s * quad_size + j * s * quad_size
+                (i+1) * s * quad_size,
+                2 * (n+2) * s * quad_size,
+                (n+2 + j) * s * quad_size
                 ]
             
         if k == 12:
             Boundary_x[i,j,k] = [
                 0.0,
                 (n+2 + i+1) * s * quad_size,
-                (n+2) * s * quad_size + (j+1) * s * quad_size
+                (n+2 + j) * s * quad_size
                 ]
             
         if k == 13:
             Boundary_x[i,j,k] = [
                 0.0,
                 (i+1) * s * quad_size,
-                (n+2) * s * quad_size + (j+1) * s * quad_size
+                (n+2 + j) * s * quad_size
                 ]
 
 @ti.kernel
@@ -349,7 +378,7 @@ def Nei_boundary_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
                     Nei_boundary_List[i0,j0,k0,Nei_boundary_Count[i0,j0,k0]] = ti.Vector([i,j,13])
                     Nei_boundary_Count[i0,j0,k0] += 1
                     
-    elif r[0] >= L - quad_size:
+    elif r[0] >= (n+2) * s * quad_size - quad_size:
         for i in range(n+2):
             for j in range(n+2):
                 if Vector_Distance(r,Boundary_x[i,j,1]) <= quad_size:
@@ -381,7 +410,7 @@ def Nei_boundary_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
                     
 
                     
-    elif r[1] >= 2 * (n+2) * quad_size - quad_size:
+    elif r[1] >= 2 * (n+2) * s * quad_size - quad_size:
         for i in range(n+2):
             for j in range(n+2):
                 if Vector_Distance(r,Boundary_x[i,j,3]) <= quad_size:
@@ -392,7 +421,7 @@ def Nei_boundary_Search(i0:ti.i32,j0:ti.i32,k0:ti.i32):
                     Nei_boundary_List[i0,j0,k0,Nei_boundary_Count[i0,j0,k0]] = ti.Vector([i,j,11])
                     Nei_boundary_Count[i0,j0,k0] += 1
                     
-    if r[2] <= 2 * quad_size:
+    if r[2] <= -s * quad_size + quad_size:
         for i in range(n+2):
             for j in range(n+2):
                 if Vector_Distance(r,Boundary_x[i,j,6]) <= quad_size:
@@ -409,6 +438,21 @@ def print_Nei_boundary_List(i0,j0,k0):
         print('No.',index)
         print('Nei_boundary:',Nei_boundary_List[i0,j0,k0,index])
 
+
+@ti.kernel
+def GetBoundaryVolume():
+    for i,j,k in Boundary_x:
+        _volume = 0.0
+        for i1 in range(n+2):
+            for j1 in range(n+2):
+                for k1 in range(14):
+                    if(Vector_Distance(Boundary_x[i,j,k],Boundary_x[i1,j1,k1]) <= 1.1 * quad_size):
+                        q = Vector_Distance(Boundary_x[i,j,k],Boundary_x[i1,j1,k1]) / (quad_size/2.0)
+                        _volume += kernel_func(q)
+        Boundary_volume[i,j,k] = 3.2 * 1.0 / _volume
+        if i==0 and j==0 and k==0:
+            print('volume=',Boundary_volume[i,j,k])
+            
 # 使用的算法是最基础的利用状态方程的SPH方法
 @ti.kernel
 def GetDensityAndPressure():
@@ -418,8 +462,9 @@ def GetDensityAndPressure():
         i_density = 0.0
         Neighbor_Search(i,j,k)
         Nei_boundary_Search(i,j,k)
-        #if i==10 and j==10 and k==10:
+        #if i==10 and j==10 and k==0:
         #    print_NeighborList(i,j,k)
+        #    print_Nei_boundary_List(i,j,k)
         for index in range(Neighbor_Count[i,j,k]):  #每个粒子对应一个邻居表，这个函数返回[i,j,k]对应的粒子的邻居数量
             r = x[
             Neighbor_List[i,j,k,index][0],
@@ -432,25 +477,37 @@ def GetDensityAndPressure():
             i_density += mass * W[i,j,k]    # 由插值公式求和计算密度
         
         for index in range(Nei_boundary_Count[i,j,k]):  #对于靠近边界的粒子，计算密度需要补上修正项
-            r = Boundary_x[
-            Nei_boundary_List[i,j,k,index][0],
-            Nei_boundary_List[i,j,k,index][1],
-            Nei_boundary_List[i,j,k,index][2]
-                ]
+            i1 = Nei_boundary_List[i,j,k,index][0]
+            j1 = Nei_boundary_List[i,j,k,index][1]
+            k1 = Nei_boundary_List[i,j,k,index][2]
+            r = Boundary_x[i1,j1,k1]
             q = Vector_Distance(x[i,j,k],r) / (quad_size/2.0)
-            kernel_fun(q,i,j,k) #核函数，结果返回到W上
-
-            i_density += mass * W[i,j,k]    # 由插值公式求和计算密度
-            
-        ##if i_density < 1.0:
-        ##    i_density = 1.0
+            i_density += density0 * Boundary_volume[i1,j1,k1] * kernel_func(q)    # 由插值公式求和计算密度
+           
         density[i,j,k] = i_density
+        
+        '''
+        print('density in ',[i,j,k])
+        print('density=',i_density)
+        '''
+        
         pressure[i,j,k] = K * ((i_density/density0)**7 - 1.0)     # 通过密度由状态方程计算压强
         if pressure[i,j,k] < 0.0:
             pressure[i, j, k] = 0.0
+            
+            '''
         if i == 10 and j == 10 and k == 10: 
-           print('density = ',density[i,j,k])
-           print('pressure = ',pressure[i,j,k])
+           print('density_center = ',density[i,j,k])
+        if i == 0 and j == 0 and k == 0: 
+           print('density_corner = ',density[i,j,k])
+        if i == 10 and j == 10 and k == 0:
+           print('density_bottom = ',density[i,j,k])
+           '''
+            
+           #print('pressure = ',pressure[i,j,k])
+        #if i_density > 1.005 or i_density <0.995:
+        #    print('index:',[i,j,k])
+        #    print('density=',i_density)
         
 
 
@@ -473,6 +530,12 @@ def GetForce():
             # 由插值公式求和计算压强场的梯度
             #i_grad_pressure += (pressure[i,j,k]/density[i,j,k]**2 + 
             #                    pressure[i1,j1,k1]/density[i1,j1,k1]**2) * delta_W
+            '''
+            if i == 0 and j == 0 and k == 0: 
+                print('neibor:',[i1,j1,k1])
+                print('density_neibor=',density[i1,j1,k1])
+                print('pressure_neibor=',pressure[i1,j1,k1])
+            '''
             a_pressure_i += mass * pressure[i1,j1,k1] / (density[i,j,k]*density[i1,j1,k1]) * delta_W
             xij = x[i,j,k]-x[i1,j1,k1]
             vij = v[i,j,k]-v[i1,j1,k1]
@@ -490,15 +553,15 @@ def GetForce():
             j1 = Nei_boundary_List[i,j,k,index][1]
             k1 = Nei_boundary_List[i,j,k,index][2]
             delta_W = grad_kernel_fun(x[i,j,k],Boundary_x[i1,j1,k1])
-            if i == 10 and j == 10 and k == 10: 
-                print('delta_W2 = ',delta_W)
+            #if i == 10 and j == 10 and k == 10: 
+            #    print('delta_W2 = ',delta_W)
             #计算边界支持力对粒子的加速度贡献
-            a_p_FromBoundary += mass * pressure[i,j,k] / density[i,j,k]**2 * delta_W
+            a_p_FromBoundary += density0 * Boundary_volume[i1,j1,k1] * pressure[i,j,k] / density[i,j,k]**2 * delta_W
             #计算边界粘性力对粒子的加速度贡献
             xij = x[i,j,k]-Boundary_x[i1,j1,k1]
             q = Vector_Distance(x[i,j,k],x[i1,j1,k1]) / (quad_size/2.0)
             kernel_fun(q,i,j,k) #核函数，结果返回到W上
-            a_v_FromBoundary += -mass * viscosity * W[i,j,k] * v[i,j,k] / density[i,j,k] / dt
+            a_v_FromBoundary += -density0 * Boundary_volume[i1,j1,k1] * viscosity * W[i,j,k] * v[i,j,k] / density[i,j,k] / dt
 
         #补足求和时省略的倍率
         #i_grad_pressure *= density[i,j,k] * mass
@@ -510,18 +573,18 @@ def GetForce():
         #a_viscosity_i = mass * viscosity * i_laplace_v
         a[i,j,k] = a_pressure_i + a_viscosity_i + a_p_FromBoundary + a_v_FromBoundary + gravity
         
-        #'''
-        if i == 10 and j == 10 and k == 10: 
+        '''
+        if i == 0 and j == 0 and k == 0: 
             print('For ',[i,j,k])
+            print('density_i',density[i,j,k])
+            print('pressure_i',pressure[i,j,k])
             print('a_pressure_i = ',a_pressure_i)
             print('a_viscosity_i = ',a_viscosity_i)
             print('a_p_FromBoundary = ',a_p_FromBoundary)
             print('a_v_FromBoundary = ',a_v_FromBoundary)
             print('a = ',a[i,j,k])
-        #'''
-        
-        
-        
+        '''
+
 
 @ti.kernel
 def print_density(i0:ti.i32,j0:ti.i32,k0:ti.i32):
@@ -550,25 +613,6 @@ def print_info(i:ti.i32,j:ti.i32,k:ti.i32):
 def test():
     for i,j,k in x:
         Neighbor_Search(i,j,k)
-
-@ti.kernel
-def check()->bool:
-    bol = True
-    for i,j,k in x:
-        r = x[i,j,k]
-        if r[0]<0.0-1.1 * quad_size or r[0]> (n+1) * quad_size + 1.1 * quad_size:
-            print('x',[i,j,k])
-            print('=',x[i,j,k])
-            bol = False
-        if r[1]<0.0-1.1 * quad_size or r[1]>(2 * (n+2)) * quad_size + 1.1 * quad_size:
-            print('x',[i,j,k])
-            print('=',x[i,j,k])
-            bol = False
-        if r[2]<0.0-1.1 * quad_size:
-            print('x',[i,j,k])
-            print('=',x[i,j,k])
-            bol = False
-    return bol
         
 if __name__ == "__main__":
     
@@ -576,6 +620,7 @@ if __name__ == "__main__":
     series_prefix = "test.ply"
     init_particle()
     init_boundary()
+    GetBoundaryVolume()
     
     for step in range(1,30000):
         if step % 1 == 0:
@@ -588,11 +633,11 @@ if __name__ == "__main__":
 
         GetForce()
         Substep()
-        if step % 200 == 1:
+        if step % 50 == 1:
             print("Step:",step)
             print_info(10,10,n-1)
 
-        if step % 200 == 1:
+        if step % 50 == 1:
             # 当前只支持通过传递单个 np.array 来添加通道
             # 所以需要转换为 np.ndarray 并且 reshape
             # 记住使用一个临时变量来存储，这样你就不必再转换回来
@@ -601,7 +646,7 @@ if __name__ == "__main__":
             writer = ti.tools.PLYWriter(num_vertices=num_vertices)
 
             writer.add_vertex_pos(np_pos[:, 0], np_pos[:, 1], np_pos[:, 2])
-            writer.export_frame_ascii(step//200+1, series_prefix)
+            writer.export_frame_ascii(step//50+1, series_prefix)
             
         #bol = check()
         #if not bol:
